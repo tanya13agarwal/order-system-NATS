@@ -1,0 +1,567 @@
+---
+
+# 🚀 What We Are Building (Final System)
+
+You will build a **production-style microservice**:
+
+```text
+order-system-nats
+```
+
+Architecture:
+
+```text
+REST API → NATS Publisher → JetStream Stream → Consumer → Processing
+                              │
+                              ▼
+                         KV Store (config)
+```
+
+---
+
+# 🧠 Features We Will Implement
+
+### Core
+
+* Publish orders
+* Consume orders
+* Durable consumer
+* Manual ACK
+
+### Reliability
+
+* Redelivery handling
+* Retry logic
+
+### Advanced
+
+* KV store (dynamic config)
+* Request-Reply
+* Queue groups
+
+---
+
+# 🧱 PHASE 1 — Create Spring Boot Project
+
+---
+
+## 👉 STEP 1 — Create Project
+
+Go to:
+
+👉 [https://start.spring.io](https://start.spring.io)
+
+---
+
+## 👉 Configure:
+
+```text
+Project: Maven
+Language: Java
+Spring Boot: latest
+Group: com.example
+Artifact: order-system-nats
+```
+
+---
+
+## 👉 Dependencies:
+
+Add:
+
+```text
+Spring Web
+Spring Boot DevTools
+Lombok
+```
+
+---
+
+## 👉 Generate & Extract
+
+Place it in:
+
+```text
+Desktop\order-system-nats
+```
+
+---
+
+# 🧠 Why no NATS dependency yet?
+
+Because we will **add it manually (best practice)**.
+
+---
+
+# 🧱 PHASE 2 — Add NATS Dependency
+
+---
+
+## 👉 Open `pom.xml`
+
+Add:
+
+```xml
+<dependency>
+    <groupId>io.nats</groupId>
+    <artifactId>jnats</artifactId>
+    <version>2.16.14</version>
+</dependency>
+```
+
+---
+
+## 🧠 What is this?
+
+```text
+jnats = official Java client for NATS
+```
+
+Equivalent to:
+
+```text
+Kafka → kafka-clients
+```
+
+---
+
+# 🧱 PHASE 3 — Project Structure (IMPORTANT)
+
+---
+
+## 👉 Create packages:
+
+```text
+com.example.ordersystemnats
+ ├── config
+ ├── controller
+ ├── producer
+ ├── consumer
+ ├── model
+ ├── service
+```
+
+---
+
+## 🧠 Why this structure?
+
+Industry standard:
+
+| Layer      | Purpose          |
+| ---------- | ---------------- |
+| controller | REST API         |
+| producer   | publish messages |
+| consumer   | consume messages |
+| service    | business logic   |
+| config     | NATS setup       |
+| model      | DTOs             |
+
+---
+
+# 🧱 PHASE 4 — Create Order Model
+
+---
+
+## 👉 `model/OrderDTO.java`
+
+```java
+package com.example.ordersystemnats.model;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.util.List;
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class OrderDTO {
+
+    private String customerName;
+    private int orderId;
+    private List<String> items;
+}
+```
+
+---
+
+## 🧠 Why DTO?
+
+```text
+Standard data contract between producer and consumer
+```
+
+---
+
+# 🧱 PHASE 5 — NATS Configuration (CORE)
+
+---
+
+## 👉 `config/NatsConfig.java`
+
+```java
+package com.example.ordersystemnats.config;
+
+import io.nats.client.Connection;
+import io.nats.client.Nats;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class NatsConfig {
+
+    @Bean
+    public Connection natsConnection() throws Exception {
+        return Nats.connect("nats://localhost:4222");
+    }
+}
+```
+
+---
+
+## 🧠 What this does
+
+```text
+Creates a single reusable NATS connection (best practice)
+```
+
+Equivalent:
+
+```text
+Kafka → ProducerFactory / ConsumerFactory
+```
+
+---
+
+# 🧱 PHASE 6 — Producer (Publisher)
+
+---
+
+## 👉 `producer/OrderPublisher.java`
+
+```java
+package com.example.ordersystemnats.producer;
+
+import com.example.ordersystemnats.model.OrderDTO;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.nats.client.Connection;
+import org.springframework.stereotype.Component;
+
+@Component
+public class OrderPublisher {
+
+    private final Connection connection;
+    private final ObjectMapper objectMapper;
+
+    public OrderPublisher(Connection connection) {
+        this.connection = connection;
+        this.objectMapper = new ObjectMapper();
+    }
+
+    public void publishOrder(OrderDTO order) throws Exception {
+
+        String subject = "orders.created";
+
+        String message = objectMapper.writeValueAsString(order);
+
+        connection.publish(subject, message.getBytes());
+
+        System.out.println("Published Order: " + message);
+    }
+}
+```
+
+---
+
+## 🧠 Line-by-line understanding
+
+```java
+connection.publish(subject, message.getBytes());
+```
+
+👉 Sends message to NATS
+
+```text
+Subject = orders.created
+```
+
+Equivalent:
+
+```text
+Kafka → topic
+```
+
+---
+
+# 🧱 PHASE 7 — REST Controller
+
+---
+
+## 👉 `controller/OrderController.java`
+
+```java
+package com.example.ordersystemnats.controller;
+
+import com.example.ordersystemnats.model.OrderDTO;
+import com.example.ordersystemnats.producer.OrderPublisher;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    private final OrderPublisher publisher;
+
+    public OrderController(OrderPublisher publisher) {
+        this.publisher = publisher;
+    }
+
+    @PostMapping
+    public String createOrder(@RequestBody OrderDTO order) throws Exception {
+        publisher.publishOrder(order);
+        return "Order published!";
+    }
+}
+```
+
+---
+
+## 🧠 Flow
+
+```text
+HTTP request → publish to NATS
+```
+
+---
+
+# 🧱 PHASE 8 — Consumer (JetStream Durable Consumer)
+
+---
+
+## 👉 `consumer/OrderConsumer.java`
+
+```java
+package com.example.ordersystemnats.consumer;
+
+import com.example.ordersystemnats.model.OrderDTO;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.nats.client.*;
+import org.springframework.stereotype.Component;
+
+import jakarta.annotation.PostConstruct;
+
+@Component
+public class OrderConsumer {
+
+    private final Connection connection;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public OrderConsumer(Connection connection) {
+        this.connection = connection;
+    }
+
+    @PostConstruct
+    public void startConsumer() throws Exception {
+
+        JetStream js = connection.jetStream();
+        JetStreamManagement jsm = connection.jetStreamManagement();
+
+        // Ensure stream exists
+        try {
+            jsm.getStreamInfo("ORDERS");
+        } catch (Exception e) {
+            jsm.addStream(StreamConfiguration.builder()
+                    .name("ORDERS")
+                    .subjects("orders.*")
+                    .build());
+        }
+
+        // Create consumer
+        PullSubscribeOptions options = PullSubscribeOptions.builder()
+                .durable("order-processor")
+                .build();
+
+        JetStreamSubscription subscription =
+                js.subscribe("orders.created", options);
+
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Message msg = subscription.nextMessage(1000);
+
+                    if (msg != null) {
+
+                        String data = new String(msg.getData());
+
+                        OrderDTO order = objectMapper.readValue(data, OrderDTO.class);
+
+                        System.out.println("Consumed Order: " + order);
+
+                        // ACK
+                        msg.ack();
+                    }
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }).start();
+    }
+}
+```
+
+---
+
+# 🧠 DEEP UNDERSTANDING
+
+---
+
+## JetStream setup
+
+```java
+JetStream js = connection.jetStream();
+```
+
+👉 Access persistence layer
+
+---
+
+## Durable consumer
+
+```java
+.durable("order-processor")
+```
+
+👉 Like Kafka consumer group
+
+---
+
+## Pull subscription
+
+```java
+subscription.nextMessage()
+```
+
+👉 Like Kafka poll()
+
+---
+
+## ACK
+
+```java
+msg.ack();
+```
+
+👉 Marks message processed
+
+---
+
+## If NO ACK?
+
+```text
+JetStream → redelivers message
+```
+
+---
+
+# 🧪 PHASE 9 — Run Application
+
+---
+
+## 👉 Step 1
+
+Start NATS server (already done)
+
+---
+
+## 👉 Step 2
+
+Run Spring Boot app
+
+---
+
+## 👉 Step 3 — Test API
+
+Use Postman:
+
+```http
+POST http://localhost:8080/orders
+```
+
+---
+
+## Body:
+
+```json
+{
+  "customerName": "Tanya",
+  "orderId": 101,
+  "items": ["Pen", "Notebook"]
+}
+```
+
+---
+
+## ✅ Output
+
+Producer logs:
+
+```text
+Published Order
+```
+
+Consumer logs:
+
+```text
+Consumed Order
+```
+
+---
+
+# 🧠 WHAT YOU BUILT
+
+You just built:
+
+```text
+REST → NATS → JetStream → Consumer → Processing
+```
+
+---
+
+# 🚀 NEXT IMPROVEMENTS (WE WILL DO NEXT)
+
+Now we will enhance:
+
+1️⃣ Retry logic
+2️⃣ Dead letter stream
+3️⃣ KV store config
+4️⃣ Request-reply
+5️⃣ Queue groups (scaling)
+
+---
+
+# 🧠 Final Mental Model
+
+```text
+Kafka                NATS
+------              ------
+Topic               Subject + Stream
+Partition           Stream sequence
+Consumer group      Durable consumer
+Offset              ACK
+Poll                nextMessage()
+```
+
+---
+
+# 🎯 Before Moving Ahead
+
+Try this:
+
+👉 Stop consumer
+👉 Send messages
+👉 Restart app
+
+👉 You should still receive messages
+
